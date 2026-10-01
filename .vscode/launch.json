@@ -1,0 +1,29 @@
+{
+    // F5 builds, deploys to %ANTIETAM_GAME_DIR% and starts the game under the Visual Studio
+    // debugger (C/C++ extension, "cppvsdbg"); breakpoints in ddraw\*.cpp work (build.bat writes
+    // ddraw.pdb). Set ANTIETAM_GAME_DIR to a game folder installed with installer\install.bat,
+    // then restart VS Code so it picks the variable up.
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Antietam (debug ddraw.dll)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${env:ANTIETAM_GAME_DIR}\Antietam_Win11.exe",
+            "args": ["-campaign", "1"],
+            "cwd": "${env:ANTIETAM_GAME_DIR}",
+            "preLaunchTask": "Build + deploy",
+            "console": "internalConsole"
+        },
+        {
+            "name": "South Mountain (debug ddraw.dll)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${env:ANTIETAM_GAME_DIR}\Antietam_Win11.exe",
+            "args": ["-campaign", "3"],
+            "cwd": "${env:ANTIETAM_GAME_DIR}",
+            "preLaunchTask": "Build + deploy",
+            "console": "internalConsole"
+        }
+    ]
+}

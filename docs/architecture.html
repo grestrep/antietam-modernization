@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>smav2 ddraw.dll Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,600;8..60,700&family=Source+Sans+3:wght@400;600&family=JetBrains+Mono:wght@400&display=swap">
+<style>
+/* Layout: single reading column, diagrams in framed panels that may scroll sideways on phones */
+:root {
+  --bg: #f6f5f1; --panel: #ffffff; --fg: #1f2328; --muted: #5d6470; --line: #d9d6cc;
+  --accent: #2d4f7c;      /* Union blue */
+  --accent2: #7a5a2e;     /* butternut */
+  --code-bg: #eeece5;
+  --display: "Source Serif 4", Georgia, serif;
+  --body: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #15181d; --panel: #1c2027; --fg: #e6e4de; --muted: #a2a8b3; --line: #343a44;
+  --accent: #8fb0e0; --accent2: #d3ad72; --code-bg: #232831; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #15181d; --panel: #1c2027; --fg: #e6e4de; --muted: #a2a8b3; --line: #343a44;
+  --accent: #8fb0e0; --accent2: #d3ad72; --code-bg: #232831; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font: 16px/1.6 var(--body); padding-inline: 16px; padding-block: 32px 64px; }
+main { max-width: 860px; margin: 0 auto; display: grid; gap: 40px; }
+header { display: grid; gap: 8px; }
+.eyebrow { font: 600 12px/1 var(--body); letter-spacing: .12em; text-transform: uppercase; color: var(--accent2); }
+h1 { font: 700 clamp(28px, 5vw, 40px)/1.15 var(--display); margin: 0; text-wrap: balance; }
+h2 { font: 600 24px/1.25 var(--display); margin: 0 0 8px; text-wrap: balance; color: var(--accent); }
+p { margin: 0 0 12px; max-width: 68ch; }
+.lede { font-size: 18px; color: var(--muted); }
+section { display: grid; gap: 12px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 16px; overflow-x: auto; }
+.panel pre.mermaid { margin: 0; background: transparent; min-width: 560px; }
+code { font: 14px var(--mono); background: var(--code-bg); padding: 1px 5px; border-radius: 3px; }
+ul { margin: 0; padding-left: 20px; display: grid; gap: 6px; max-width: 68ch; }
+table { border-collapse: collapse; width: 100%; font-size: 15px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-weight: 600; color: var(--muted); font-size: 13px; letter-spacing: .04em; text-transform: uppercase; }
+.num { font-variant-numeric: tabular-nums; }
+.note { border-left: 3px solid var(--accent2); padding: 4px 0 4px 12px; color: var(--muted); max-width: 68ch; }
+</style>
+
+</head><body>
+<main>
+<header>
+  <div class="eyebrow">Sid Meier's Antietam! · Windows 10/11</div>
+  <h1>How our ddraw.dll works</h1>
+  <p class="lede">The game was built in 2000 for a 800×600, 256-colour fullscreen screen. Our DLL sits between the game and Windows, keeps the game believing it has that screen, and shows its picture the modern way: enlarged, sharp, in a window or borderless, through the graphics card.</p>
+</header>
+
+<section>
+  <h2>1. Where the DLL sits</h2>
+  <p>The game asks Windows for <code>ddraw.dll</code> by name. Windows looks in the game folder first, so it gets ours. We load the real Windows DirectDraw ourselves and pass most things on. Only the parts that matter are changed.</p>
+  <div class="panel"><pre class="mermaid">
+flowchart TB
+  subgraph Game["Antietam_Win11.exe (your unchanged Antietam.exe)"]
+    G1["Game logic + its own CPU renderer<br/>builds every 800×600 frame in memory"]
+    G2["Mode switch<br/>DirectDraw: 800×600×8"]
+    G3["Copies finished frames to its window<br/>GDI: GetDC, BitBlt, TextOut..."]
+    G4["Reads the mouse<br/>GetCursorPos, ScreenToClient, GetAsyncKeyState"]
+  end
+  subgraph Ours["smav2 ddraw.dll (game folder)"]
+    D1["DirectDraw interception<br/>fakes the mode switch"]
+    D2["Import hooks<br/>redirect drawing + translate mouse"]
+    D3["Virtual screen<br/>800×600 picture in memory"]
+    D4["Presenter<br/>Direct3D 11 (GPU) or GDI (CPU)"]
+    D5["Window manager<br/>borderless / windowed / exclusive"]
+  end
+  subgraph Win["Windows"]
+    W1["Real ddraw.dll"]
+    W2["GDI"]
+    W3["Direct3D 11 / DXGI"]
+    W4["Your monitor, e.g. 1920×1200"]
+  end
+  G2 --> D1 --> W1
+  G3 --> D2 --> D3 --> D4
+  G4 --> D2
+  D4 --> W3 --> W4
+  D4 -. renderer=gdi .-> W2 --> W4
+  D1 --> D5
+  </pre></div>
+</section>
+
+<section>
+  <h2>2. Start-up: faking the 800×600 switch</h2>
+  <p>The game only uses DirectDraw for the screen-mode switch. We let it create the real DirectDraw object, then swap five of its functions for ours. From then on the game thinks the monitor is at 800×600; in reality nothing changes, and we take over its window.</p>
+  <div class="panel"><pre class="mermaid">
+sequenceDiagram
+  participant G as Game
+  participant D as Our DLL
+  participant W as Windows
+  G->>D: DirectDrawCreate()
+  D->>W: real DirectDrawCreate()
+  D-->>G: DirectDraw object (5 functions patched)
+  G->>D: SetCooperativeLevel(EXCLUSIVE fullscreen)
+  D->>W: SetCooperativeLevel(NORMAL)
+  Note over D: take over the game window:<br/>borderless 1920×1200 or a window,<br/>start presenter + watchdog
+  G->>D: SetDisplayMode(800, 600, 8 bit)
+  Note over D: remember 800×600, monitor untouched
+  D-->>G: OK
+  G->>D: GetSystemMetrics(screen size)
+  D-->>G: 800 × 600 (the size it expects)
+  </pre></div>
+  <p class="note">With <code>mode=fullscreen</code> none of this happens: the DLL passes every call straight to Windows and the game runs exactly like the original.</p>
+</section>
+
+<section>
+  <h2>3. One frame: from the game to your screen</h2>
+  <p>The game draws into what it thinks is its window. Our hooks redirect every drawing call into the <strong>virtual screen</strong>, an invisible 800×600 picture. When the game finishes a frame, or draws even a small change such as a hover highlight, we present: enlarge the picture and put it on the real screen.</p>
+  <div class="panel"><pre class="mermaid">
+flowchart LR
+  A["Game draws frame<br/>BitBlt / TextOut / FillRect<br/>on its window DC"] --> B{"Our hooks:<br/>is it the game window?"}
+  B -- yes --> C["Draw into virtual screen<br/>800×600, 32-bit"]
+  B -- no --> X["Real GDI<br/>(menus of other windows etc.)"]
+  C --> P{"When to present?"}
+  P -- "frame finished<br/>or big blit" --> S["Present now"]
+  P -- "small change<br/>(hover, drag box)" --> T["Present now, at most<br/>every 2 ms (6 ms GDI)"]
+  P -- "had to wait" --> F["Flush from timeGetTime /<br/>GetAsyncKeyState hooks<br/>(called thousands of times a second)"]
+  S --> R["Presenter"]
+  T --> R
+  F --> R
+  </pre></div>
+</section>
+
+<section>
+  <h2>4. The presenter: two threads, no waiting</h2>
+  <p>With <code>renderer=d3d11</code> the game thread only copies the finished picture (about 0.2 ms) and signals a separate render thread. That thread owns the graphics card connection, uploads the picture as a texture, runs the chosen filter shader and waits for v-sync. The game never waits for the GPU, so its own timing stays exactly as Firaxis made it.</p>
+  <div class="panel"><pre class="mermaid">
+flowchart LR
+  subgraph T1["Game thread"]
+    a1["Present()"] --> a2["copy 800×600 frame<br/>into shared buffer"] --> a3["wake render thread"]
+  end
+  subgraph T2["Render thread (ours)"]
+    b1["upload as GPU texture"] --> b2["clear black bars"] --> b3["draw picture rectangle<br/>with filter shader"] --> b4["Present with v-sync<br/>(1 frame queued max)"]
+  end
+  a3 --> b1
+  b4 --> M["Monitor"]
+  </pre></div>
+  <table>
+    <thead><tr><th>Filter</th><th>What it does</th><th>Best for</th></tr></thead>
+    <tbody>
+      <tr><td><code>nearest</code></td><td>Each game pixel becomes a solid block</td><td>Whole factors: 2× (your 1600×1200)</td></tr>
+      <tr><td><code>sharp</code></td><td>Solid blocks, blended only along their edges</td><td>Odd sizes: 1024×768, 1280×960</td></tr>
+      <tr><td><code>linear</code></td><td>Smooth blend everywhere</td><td>Softer look</td></tr>
+      <tr><td><code>scale2x</code></td><td>Rounds off jagged diagonal pixel edges</td><td>Trying a smoothed pixel-art look</td></tr>
+      <tr><td><code>auto</code></td><td>nearest at whole factors, sharp otherwise</td><td>Default</td></tr>
+    </tbody>
+  </table>
+  <p class="note">If Direct3D 11 cannot start, or the graphics driver resets twice, the DLL switches to the GDI presenter by itself: the CPU does the enlarging with Windows' old drawing functions.</p>
+</section>
+
+<section>
+  <h2>5. The mouse: translating coordinates</h2>
+  <p>The game expects a 800×600 screen with the mouse between 0 and 799. On your monitor the picture is 1600×1200 starting 160 pixels from the left. Our hooks translate every position the game reads, and the cursor is kept inside the picture so edge scrolling works.</p>
+  <div class="panel"><pre class="mermaid">
+flowchart LR
+  M["Real mouse<br/>screen (1100, 600)"] --> H["ScreenToClient hook<br/>(1100 − 160) ÷ 2, 600 ÷ 2"] --> V["Game sees<br/>(470, 300)"]
+  V2["Game asks to put something at<br/>game (470, 300)"] --> H2["ClientToScreen hook<br/>160 + 470 × 2, 300 × 2"] --> R["Real screen<br/>(1100, 600)"]
+  </pre></div>
+  <ul>
+    <li><strong>Mouse messages</strong> (clicks, moves) are translated the same way before the game's window code sees them.</li>
+    <li><strong>Clip</strong>: while the game is active the cursor cannot leave the picture, so touching the edge scrolls the map.</li>
+    <li><strong>Any size</strong>: the maths is exact for any window size, which is why resizing and maximising work.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>6. Keeping an old game happy in a modern window</h2>
+  <table>
+    <thead><tr><th>Problem</th><th>Cause</th><th>What the DLL does</th></tr></thead>
+    <tbody>
+      <tr><td>Fake "Not Responding" freeze</td><td>The game never reads its mouse/keyboard messages, so Windows covered it with a frozen ghost image</td><td>Turns ghosting off for the game</td></tr>
+      <tr><td>Game pausing on focus loss</td><td>Written for exclusive fullscreen</td><td>Never tells the game it lost focus (<code>keep_focus</code>)</td></tr>
+      <tr><td>Game moving its window to (0,0)</td><td>It still thinks it is fullscreen</td><td>Ignores the game's own window moves; you can still move/resize it</td></tr>
+      <tr><td>Mouse lag on hover and drag</td><td>Small updates waited for a timer the game only processes every ~160 ms</td><td>Presents small changes immediately (79 ms → 2 ms)</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>7. The four modes</h2>
+  <table>
+    <thead><tr><th><code>mode=</code></th><th>Monitor</th><th>Picture</th><th>Drawn by</th></tr></thead>
+    <tbody>
+      <tr><td><code>borderless</code> (default)</td><td>Stays 1920×1200</td><td>Whole-factor enlarged, centred (2× = 1600×1200)</td><td>Direct3D 11 or GDI</td></tr>
+      <tr><td><code>windowed</code></td><td>Stays 1920×1200</td><td>Any 4:3 size, resizable, e.g. 1024×768</td><td>Direct3D 11 or GDI</td></tr>
+      <tr><td><code>exclusive</code></td><td>Switches to 800×600 (full colour)</td><td>1:1</td><td>Direct3D 11 exclusive fullscreen</td></tr>
+      <tr><td><code>fullscreen</code></td><td>Switches to 800×600×256 colours</td><td>Original</td><td>The game itself (DLL passes through)</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>8. Files</h2>
+  <table>
+    <thead><tr><th>File (ddraw/)</th><th>Role</th></tr></thead>
+    <tbody>
+      <tr><td><code>smav2_ddraw.cpp</code></td><td>DirectDraw interception, window manager, import hooks, virtual screen, GDI presenter, watchdog</td></tr>
+      <tr><td><code>present_d3d11.cpp / .h</code></td><td>Direct3D 11 presenter and its render thread, exclusive fullscreen</td></tr>
+      <tr><td><code>shaders.hlsl</code></td><td>The filter shaders (compiled into the DLL at build time)</td></tr>
+      <tr><td><code>ddraw.def</code></td><td>The DLL's export list, identical to Windows' ddraw.dll</td></tr>
+      <tr><td><code>smav2.ini</code></td><td>Your settings: mode, scale, window size, filter, renderer, v-sync</td></tr>
+      <tr><td><code>build.bat</code></td><td>Builds everything with Visual Studio</td></tr>
+    </tbody>
+  </table>
+  <p class="note">The Windows 11 crash fixes are in the DLL too: it redirects the game's wrong memory-free calls (GlobalFree) to the game's own correct routine, and the installer runs the game under a new name (<code>Antietam_Win11.exe</code>) so Windows' broken compatibility fix for <code>Antietam.exe</code> doesn't apply. Your <code>Antietam.exe</code> is never modified.</p>
+</section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "default" });</script>
+</body></html>

@@ -1,0 +1,49 @@
+# Builds ddraw.dll (32-bit) on every push/PR; on a version tag (v1.2.3) also packages the
+# player zip and attaches it, with its SHA-256, to a GitHub release.
+name: build
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build ddraw.dll (MSVC x86)
+        shell: cmd
+        run: ddraw\build.bat
+
+      - name: Build logger (tools)
+        shell: cmd
+        run: tools\logger\build.bat
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $v = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF_NAME.TrimStart('v') } else { "ci-$($env:GITHUB_SHA.Substring(0,7))" }
+          ./scripts/package.ps1 -Version $v
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: antietam-modernization
+          path: |
+            dist/*.zip
+            dist/*.sha256
+            ddraw/build/ddraw.pdb
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/*.sha256
+          prerelease: ${{ contains(github.ref_name, '-') }}

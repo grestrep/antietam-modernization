@@ -1,0 +1,26 @@
+; Export table of the logging proxy ddraw.dll: same names/ordinals as Windows ddraw.dll.
+; Proxy_* = wrapped by us, Fwd_* = forwarded unchanged to the system ddraw.dll.
+LIBRARY ddraw
+EXPORTS
+    AcquireDDThreadLock         = Fwd_AcquireDDThreadLock          @1
+    CompleteCreateSysmemSurface = Fwd_CompleteCreateSysmemSurface  @2
+    D3DParseUnknownCommand      = Fwd_D3DParseUnknownCommand       @3
+    DDGetAttachedSurfaceLcl     = Fwd_DDGetAttachedSurfaceLcl      @4
+    DDInternalLock              = Fwd_DDInternalLock               @5
+    DDInternalUnlock            = Fwd_DDInternalUnlock             @6
+    DSoundHelp                  = Fwd_DSoundHelp                   @7
+    DirectDrawCreate            = Proxy_DirectDrawCreate           @8
+    DirectDrawCreateClipper     = Fwd_DirectDrawCreateClipper      @9
+    DirectDrawCreateEx          = Proxy_DirectDrawCreateEx         @10
+    DirectDrawEnumerateA        = Fwd_DirectDrawEnumerateA         @11
+    DirectDrawEnumerateExA      = Fwd_DirectDrawEnumerateExA       @12
+    DirectDrawEnumerateExW      = Fwd_DirectDrawEnumerateExW       @13
+    DirectDrawEnumerateW        = Fwd_DirectDrawEnumerateW         @14
+    DllCanUnloadNow             = Fwd_DllCanUnloadNow              PRIVATE
+    DllGetClassObject           = Fwd_DllGetClassObject            PRIVATE
+    GetDDSurfaceLocal           = Fwd_GetDDSurfaceLocal            @17
+    GetOLEThunkData             = Fwd_GetOLEThunkData              @18
+    GetSurfaceFromDC            = Fwd_GetSurfaceFromDC             @19
+    RegisterSpecialCase         = Fwd_RegisterSpecialCase          @20
+    ReleaseDDThreadLock         = Fwd_ReleaseDDThreadLock          @21
+    SetAppCompatData            = Fwd_SetAppCompatData             @22

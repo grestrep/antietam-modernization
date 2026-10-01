@@ -1,0 +1,18 @@
+ddraw proxy call counts at tick 732938171
+
+IDirectDraw
+           2  SetCooperativeLevel
+           1  Release
+           1  CreatePalette
+           1  CreateSurface
+           1  RestoreDisplayMode
+           1  SetDisplayMode
+
+IDirectDrawSurface
+          11  Release
+           8  QueryInterface
+           4  GetColorKey
+           1  GetSurfaceDesc
+
+IDirectDrawPalette
+           1  Release

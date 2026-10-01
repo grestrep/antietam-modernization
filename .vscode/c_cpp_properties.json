@@ -1,0 +1,16 @@
+{
+    // IntelliSense for the C/C++ extension: 32-bit MSVC, same settings as build.bat.
+    // "build" is on the include path for the shader headers build.bat generates (build once).
+    // Without compilerPath the extension finds the newest installed MSVC itself.
+    "configurations": [
+        {
+            "name": "Win32 MSVC x86",
+            "intelliSenseMode": "windows-msvc-x86",
+            "cStandard": "c17",
+            "cppStandard": "c++17",
+            "includePath": [ "${workspaceFolder}/ddraw", "${workspaceFolder}/ddraw/build" ],
+            "defines": [ "WIN32", "_WINDOWS", "_USRDLL" ]
+        }
+    ],
+    "version": 4
+}

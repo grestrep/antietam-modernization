@@ -1,0 +1,37 @@
+{
+    // Build/deploy tasks. Ctrl+Shift+B = "Build ddraw.dll" (the default build task).
+    // The .bat files set up the MSVC x86 environment themselves (vcvars32), so VS Code
+    // needs no special terminal. Compiler errors appear in the Problems panel ($msCompile).
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build ddraw.dll",
+            "type": "shell",
+            "command": "${workspaceFolder}\\ddraw\\build.bat",
+            "options": { "shell": { "executable": "cmd.exe", "args": ["/d", "/c"] } },
+            "group": { "kind": "build", "isDefault": true },
+            "problemMatcher": { "base": "$msCompile", "fileLocation": ["relative", "${workspaceFolder}\\ddraw"] }
+        },
+        {
+            "label": "Build logger (tools/logger)",
+            "type": "shell",
+            "command": "${workspaceFolder}\\tools\\logger\\build.bat",
+            "options": { "shell": { "executable": "cmd.exe", "args": ["/d", "/c"] } },
+            "group": "build",
+            "problemMatcher": { "base": "$msCompile", "fileLocation": ["relative", "${workspaceFolder}\\tools\\logger"] }
+        },
+        {
+            "label": "Deploy to game folder",
+            "type": "shell",
+            "command": "${workspaceFolder}\\deploy.bat",
+            "options": { "shell": { "executable": "cmd.exe", "args": ["/d", "/c"] } },
+            "problemMatcher": []
+        },
+        {
+            "label": "Build + deploy",
+            "dependsOrder": "sequence",
+            "dependsOn": ["Build ddraw.dll", "Deploy to game folder"],
+            "problemMatcher": []
+        }
+    ]
+}
