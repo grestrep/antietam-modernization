@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.9.0 (beta) - unreleased
+## 0.9.0 (beta) - 2026-10-01
 First public beta. Requires Sid Meier's Antietam! with the v3.0 Final Patch (exe v12.10, as in the Civil War Collection: Antietam + South Mountain) or the v2.0 Beta Patch (exe v9.84: Antietam only).
 
 - **Old Windows 98 DLLs:** the installer moves `setupapi.dll` / `cfgmgr32.dll` out of the game folder if present.
