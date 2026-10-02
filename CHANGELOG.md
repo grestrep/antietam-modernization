@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- **Scenario lists at full size:** the scenario list and the Battle History chapter list are separate windows the game draws at 1:1 size; they are now enlarged like the rest of the screen, and clicks land on the right item.
+- **Pop-ups inside the game window:** "Select scenario type", the Save/Load dialogs and the Battle History text pane used to appear at the monitor's top-left corner. They now appear inside the game picture (centred dialogs stay centred), at their original size.
 - **Edge-scroll speed limit (`[game] max_fps`, default 40):** the game moves the map a step per frame and runs hundreds of frames per second on modern PCs, so edge scrolling was far too fast. The DLL now paces whole-screen frames to `max_fps` (same approach as DDrawCompat's FpsLimiter: one high-resolution wait per frame, no catch-up bursts). Menus, dialogs and highlights are not paced. `0` turns it off.
 
 ## 0.9.0 (beta) - 2026-10-01

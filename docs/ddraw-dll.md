@@ -142,6 +142,8 @@ The game's 8-bit DIB sections carry their own colour tables, so blitting them in
 | `GetWindowRect(game window)` | 800×600 at the picture's screen position |
 | Mouse messages `WM_MOUSEMOVE … WM_MBUTTONDBLCLK` | lParam translated real → virtual in our WndProc |
 | `MoveWindow`/`SetWindowPos` on child windows of the game window | Scaled |
+| Panels (`WS_CHILD` windows of the game window the exe creates, e.g. the scenario list, the Battle History chapter list) | Created/moved scaled; `GetDC`/`BeginPaint` return an off-screen bitmap of the panel's game size, copied enlarged into the real window after each drawing call; mouse messages translated in a `PeekMessageA` hook (the game reads them from its message loop) |
+| Pop-ups (`WS_POPUP` windows owned by the game window: "Select scenario type", Save/Load dialogs, the Battle History text pane) | Original size, moved into the picture: the centre of the spot the game chose is mapped into the picture. A child window later created at exactly a pop-up's spot (the Battle History pane is recreated that way) is treated the same |
 | `SetWindowRgn(game window)` | Ignored (it would cut the monitor-sized window) |
 | Cursor clip | The picture rectangle, so edge scrolling triggers at the picture's edge and the cursor never enters the bars |
 
@@ -150,7 +152,7 @@ The game's 8-bit DIB sections carry their own colour tables, so blitting them in
 **Known limits:**
 - **Mouse cursor:** stays at normal size.
 - **Intro videos:** an MCI AVI child window plays at native 640×480, centred.
-- **Popups:** top-level popup windows of the game (if any) are positioned correctly but not enlarged.
+- **Pop-ups:** placed inside the picture but kept at their original size (a deliberate choice).
 
 ### 3.7 Direct3D 11 presenter (`renderer=d3d11`; `present_d3d11.cpp`, `shaders.hlsl`)
 This replaces the GDI `StretchBlt` in `Present()` with the GPU. Everything before that (virtual screen, hooks, layout, mouse mapping) is unchanged and shared with the GDI renderer.

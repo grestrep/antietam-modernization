@@ -912,6 +912,225 @@ REAL(GetSystemMetrics); REAL(GetDC); REAL(ReleaseDC); REAL(BeginPaint); REAL(End
 REAL(ScreenToClient); REAL(ClientToScreen); REAL(GetWindowRect); REAL(MoveWindow); REAL(SetWindowPos);
 REAL(SetWindowRgn); REAL(FillRect); REAL(TextOutA); REAL(SelectClipRgn); REAL(SelectPalette);
 REAL(RealizePalette); REAL(GetSystemPaletteEntries); REAL(timeGetTime); REAL(GetAsyncKeyState);
+REAL(CreateWindowExA);
+
+// --- the game's other windows: panels and pop-ups -------------------------------------------
+// Besides the main window, the game creates windows of its own and draws into their window DCs
+// directly (GetDC + BitBlt/TextOut + ReleaseDC), bypassing our scaled picture:
+//   * panels: WS_CHILD windows of the game window, e.g. the scenario list (312x449) and the
+//     Battle History chapter list. Without help their content stays at 1:1 size inside the
+//     enlarged screen. While scaling, each panel ("sub-window") gets the main window's treatment:
+//       - it is created/moved at the scaled size and position inside the picture;
+//       - GetDC/BeginPaint return an off-screen bitmap of its game size; after drawing we copy
+//         that bitmap into the real window, enlarged with the picture's scale;
+//       - its mouse messages and ScreenToClient/ClientToScreen/GetWindowRect are converted back
+//         to game coordinates.
+//   * pop-ups: WS_POPUP windows owned by the game window, e.g. "Select scenario type...", the
+//     Save/Load dialogs and the Battle History text pane. The game places them in its 800x600
+//     "screen" coordinates, so without help they land near the monitor's top-left corner. We keep
+//     them at their original size (a deliberate choice) and only move them: the centre of the
+//     spot the game chose is mapped into the picture (see PopupRealPos).
+// Windows created by other code (e.g. the MCI intro-video window) are not affected: we only see
+// the CreateWindowExA calls the game exe makes.
+struct SubWin {
+    HWND    h;
+    HWND    parent;          // the game window or another panel
+    RECT    v;               // game coordinates in the parent's client area
+    HDC     mdc;             // off-screen copy at game size (0 until first GetDC/BeginPaint)
+    HBITMAP bmp, oldBmp;
+    WNDPROC orig;
+    bool    drawn;           // the game has drawn into mdc: only then do we show it (some panels
+                             // are never drawn into - the game paints their area via the parent)
+};
+static SubWin g_sub[32];
+
+static SubWin* FindSub(HWND h)
+{
+    if (!h) return 0;
+    for (SubWin& s : g_sub) if (s.h == h) return &s;
+    return 0;
+}
+static SubWin* FindSubByDC(HDC dc)
+{
+    if (!dc) return 0;
+    for (SubWin& s : g_sub) if (s.h && s.mdc == dc) return &s;
+    return 0;
+}
+
+// Game length -> real length at the picture's scale (exact, like ToRealX without the offset).
+static int ScaleX(int v) { return (int)((long long)v * g_pw / (int)g_w); }
+static int ScaleY(int v) { return (int)((long long)v * g_ph / (int)g_h); }
+
+// Real rectangle for a panel, in its parent's client coordinates. Panels of the game window get
+// the picture offset (the black bars) added.
+static RECT SubRealRect(HWND parent, const RECT& v)
+{
+    RECT r;
+    if (parent == g_hwnd) {
+        SetRect(&r, ToRealX(v.left), ToRealY(v.top), ToRealX(v.right), ToRealY(v.bottom));
+    } else {
+        SetRect(&r, ScaleX(v.left), ScaleY(v.top), ScaleX(v.right), ScaleY(v.bottom));
+    }
+    return r;
+}
+
+// Copies the panel's off-screen bitmap into the real window, enlarged.
+static void PresentSub(SubWin* s)
+{
+    if (!s || !s->mdc || !s->drawn) return;
+    RECT c; GetClientRect(s->h, &c);
+    int vw = s->v.right - s->v.left, vh = s->v.bottom - s->v.top;
+    HDC dc = g_real_GetDC(s->h);
+    bool whole = c.right % vw == 0 && c.bottom % vh == 0;            // 2x, 3x: keep pixels sharp
+    SetStretchBltMode(dc, whole ? COLORONCOLOR : HALFTONE); SetBrushOrgEx(dc, 0, 0, 0);
+    g_realStretchBlt(dc, 0, 0, c.right, c.bottom, s->mdc, 0, 0, vw, vh, SRCCOPY);
+    g_real_ReleaseDC(s->h, dc);
+    // the window DC does not clip child windows, so redraw the children on top
+    for (SubWin& k : g_sub) if (k.h && k.parent == s->h && k.drawn && IsWindowVisible(k.h)) PresentSub(&k);
+}
+
+static void FreeSub(SubWin* s)
+{
+    if (s->mdc) { SelectObject(s->mdc, s->oldBmp); DeleteObject(s->bmp); DeleteDC(s->mdc); }
+    ZeroMemory(s, sizeof *s);
+}
+
+// The off-screen bitmap, created on first use (32-bit like the main virtual screen).
+static HDC SubDC(SubWin* s)
+{
+    if (!s->mdc) {
+        int vw = s->v.right - s->v.left, vh = s->v.bottom - s->v.top;
+        BITMAPINFO bi = {}; bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+        bi.bmiHeader.biWidth = vw; bi.bmiHeader.biHeight = -vh;
+        bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32;
+        void* bits;
+        s->mdc = CreateCompatibleDC(0);
+        s->bmp = CreateDIBSection(s->mdc, &bi, DIB_RGB_COLORS, &bits, 0, 0);
+        s->oldBmp = (HBITMAP)SelectObject(s->mdc, s->bmp);
+    }
+    return s->mdc;
+}
+
+// Real client pixel of a panel -> game pixel.
+static POINT SubRealToVirt(SubWin* s, POINT r)
+{
+    RECT c; GetClientRect(s->h, &c);
+    int vw = s->v.right - s->v.left, vh = s->v.bottom - s->v.top;
+    POINT v = { c.right ? (LONG)((long long)r.x * vw / c.right) : r.x,
+                c.bottom ? (LONG)((long long)r.y * vh / c.bottom) : r.y };
+    return v;
+}
+
+static LRESULT CALLBACK SubWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp)
+{
+    SubWin* s = FindSub(h);
+    if (!s) return DefWindowProcA(h, m, wp, lp);
+    WNDPROC orig = s->orig;
+    if (m == WM_ERASEBKGND && s->drawn) return 1;          // our copy covers it; avoids flicker
+    LRESULT res = CallWindowProcA(orig, h, m, wp, lp);
+    if (m == WM_PAINT) { ValidateRect(h, 0); PresentSub(FindSub(h)); }   // e.g. after being uncovered
+    if (m == WM_NCDESTROY) { SetWindowLongA(h, GWL_WNDPROC, (LONG)(LONG_PTR)orig); if ((s = FindSub(h))) FreeSub(s); }
+    return res;
+}
+
+// Pop-ups keep their size; the centre of the spot the game chose (in its 800x600 screen) is
+// mapped into the picture, so a centred dialog stays centred and a side pane stays on its side.
+static POINT PopupRealPos(int x, int y, int w, int h)
+{
+    POINT o = { 0, 0 }; g_real_ClientToScreen(g_hwnd, &o);
+    POINT p = { o.x + ToRealX(x + w / 2) - w / 2, o.y + ToRealY(y + h / 2) - h / 2 };
+    return p;
+}
+// Same pane, two kinds of window: the game first shows the Battle History text pane as a pop-up
+// (395,25 383x512) and, after a chapter is clicked, recreates it as a child of the game window at
+// the same spot. To keep it at its original size either way, we remember where pop-ups were and
+// treat a child window created at exactly such a spot like the pop-up ("keep-size child").
+static RECT g_popupSpots[8];                     // game rectangles of recent pop-ups (ring buffer)
+static int  g_popupSpotNext;
+static HWND g_keepSize[16];                      // children kept at original size
+static bool IsPopupSpot(const RECT& v)
+{
+    for (const RECT& r : g_popupSpots) if (EqualRect(&r, &v)) return true;
+    return false;
+}
+static bool IsKeepSizeChild(HWND h)
+{
+    if (!h || !g_scaling) return false;
+    for (HWND k : g_keepSize) if (k == h) return true;
+    return false;
+}
+static bool IsGamePopup(HWND h)
+{
+    return g_scaling && h && g_hwnd && h != g_hwnd && !(GetWindowLongA(h, GWL_STYLE) & WS_CHILD) &&
+           GetWindow(h, GW_OWNER) == g_hwnd;
+}
+// A keep-size child's position inside the game window's client area (same centre mapping).
+static POINT KeepSizeClientPos(int x, int y, int w, int h)
+{
+    POINT p = { ToRealX(x + w / 2) - w / 2, ToRealY(y + h / 2) - h / 2 };
+    return p;
+}
+
+// The game takes the mouse messages of its panels straight from its PeekMessage loop
+// (they never reach the window procedure), so their coordinates are converted here.
+REAL(PeekMessageA);
+static BOOL WINAPI Hook_PeekMessageA(LPMSG msg, HWND h, UINT mn, UINT mx, UINT rm)
+{
+    BOOL r = g_real_PeekMessageA(msg, h, mn, mx, rm);
+    if (r && msg && msg->message >= WM_MOUSEFIRST && msg->message <= WM_MOUSELAST &&
+        msg->message != WM_MOUSEWHEEL && msg->message != WM_MOUSEHWHEEL)
+        if (SubWin* s = FindSub(msg->hwnd)) {
+            POINT rp = { (short)LOWORD(msg->lParam), (short)HIWORD(msg->lParam) };
+            POINT v = SubRealToVirt(s, rp);
+            msg->lParam = MAKELPARAM((WORD)(short)v.x, (WORD)(short)v.y);
+        }
+    return r;
+}
+
+static HWND WINAPI Hook_CreateWindowExA(DWORD ex, LPCSTR cls, LPCSTR name, DWORD st, int x, int y, int w, int h,
+                                        HWND parent, HMENU menu, HINSTANCE inst, LPVOID param)
+{
+    bool child = (st & WS_CHILD) != 0;
+    bool sized = w > 0 && h > 0 && w != CW_USEDEFAULT && x != CW_USEDEFAULT;
+    if (g_scaling && g_hwnd && parent == g_hwnd && !child && sized) {        // pop-up: move only
+        POINT p = PopupRealPos(x, y, w, h);
+        HWND hw = g_real_CreateWindowExA(ex, cls, name, st, p.x, p.y, w, h, parent, menu, inst, param);
+        Log("pop-up %p \"%s\" %dx%d at (%d,%d) -> placed at (%ld,%ld), original size", hw, name ? name : "",
+            w, h, x, y, p.x, p.y);
+        SetRect(&g_popupSpots[g_popupSpotNext++ % 8], x, y, x + w, y + h);
+        return hw;
+    }
+    RECT spot = { x, y, x + w, y + h };
+    if (g_scaling && g_hwnd && parent == g_hwnd && child && sized && IsPopupSpot(spot)) {   // see g_popupSpots
+        POINT p = KeepSizeClientPos(x, y, w, h);
+        HWND hw = g_real_CreateWindowExA(ex, cls, name, st, p.x, p.y, w, h, parent, menu, inst, param);
+        for (HWND& k : g_keepSize) if (!k || !IsWindow(k)) { k = hw; break; }
+        Log("child %p %dx%d at (%d,%d) takes a pop-up's place -> placed at (%ld,%ld), original size",
+            hw, w, h, x, y, p.x, p.y);
+        return hw;
+    }
+    bool ours = g_scaling && g_hwnd && child && parent && (parent == g_hwnd || FindSub(parent)) && sized;
+    if (!ours) {
+        HWND hw = g_real_CreateWindowExA(ex, cls, name, st, x, y, w, h, parent, menu, inst, param);
+        if (g_scaling && g_hwnd)
+            Log("window %p \"%s\" (style %08lx, %d,%d %dx%d, parent %p) left unscaled", hw, name ? name : "",
+                st, x, y, w, h, parent);
+        return hw;
+    }
+    RECT v = { x, y, x + w, y + h };
+    RECT r = SubRealRect(parent, v);
+    HWND hw = g_real_CreateWindowExA(ex, cls, name, st, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                                     parent, menu, inst, param);
+    if (!hw) return hw;
+    for (SubWin& s : g_sub) if (!s.h) {
+        s.h = hw; s.parent = parent; s.v = v;
+        s.orig = (WNDPROC)SetWindowLongA(hw, GWL_WNDPROC, (LONG)(LONG_PTR)SubWndProc);
+        Log("panel %p %dx%d at (%d,%d) -> scaled", hw, w, h, x, y);
+        return hw;
+    }
+    Log("NOTE: more than %d game panels, %p left unscaled", (int)(sizeof g_sub / sizeof g_sub[0]), hw);
+    return hw;
+}
 
 // GetSystemMetrics: the game sizes things from the "screen" size, which after a real mode switch
 // would be 800x600. Report the emulated mode instead of the real desktop size.
@@ -935,15 +1154,25 @@ static SHORT WINAPI Hook_GetAsyncKeyState(int k) { if (g_dirty) FlushIfDue(); re
 static HDC WINAPI Hook_GetDC(HWND h)
 {
     if (g_scaling && h && h == g_hwnd && g_vdc) return g_vdc;
+    if (SubWin* s = FindSub(h)) return SubDC(s);         // panel: its off-screen copy
     return g_real_GetDC(h);
 }
 static int WINAPI Hook_ReleaseDC(HWND h, HDC dc)
 {
     if (dc && dc == g_vdc) { PresentSoon(); return 1; }  // the game finished a frame
+    if (SubWin* s = FindSubByDC(dc)) { PresentSub(s); return 1; }
     return g_real_ReleaseDC(h, dc);
 }
 static HDC WINAPI Hook_BeginPaint(HWND h, LPPAINTSTRUCT ps)
 {
+    if (SubWin* s = FindSub(h)) {
+        PAINTSTRUCT real;
+        g_real_BeginPaint(h, &real); g_real_EndPaint(h, &real);         // validate the real window
+        *ps = real;
+        ps->hdc = SubDC(s);
+        SetRect(&ps->rcPaint, 0, 0, s->v.right - s->v.left, s->v.bottom - s->v.top);
+        return ps->hdc;
+    }
     if (!(g_scaling && h == g_hwnd && g_vdc)) return g_real_BeginPaint(h, ps);
     g_real_BeginPaint(h, &g_realPs);                     // validates the update region
     *ps = g_realPs;
@@ -953,6 +1182,7 @@ static HDC WINAPI Hook_BeginPaint(HWND h, LPPAINTSTRUCT ps)
 }
 static BOOL WINAPI Hook_EndPaint(HWND h, const PAINTSTRUCT* ps)
 {
+    if (SubWin* s = FindSub(h)) { if (ps && ps->hdc == s->mdc) { PresentSub(s); return TRUE; } }
     if (!(g_scaling && h == g_hwnd && ps && ps->hdc == g_vdc)) return g_real_EndPaint(h, ps);
     g_real_EndPaint(h, &g_realPs);
     Present();
@@ -966,6 +1196,7 @@ static BOOL WINAPI Hook_BitBlt(HDC d, int x, int y, int w, int h, HDC s, int sx,
     if (d == g_vdc && g_vdc && x == 0 && y == 0 && w == (int)g_w && h == (int)g_h) FrameLimit();   // whole screen = frame
     if (d == g_vdc && g_vdc && w * h * 4 >= (int)(g_w * g_h)) PresentSoon();   // big blit: present now
     else if (d == g_vdc && g_vdc) MarkDirty();
+    else if (SubWin* sw = FindSubByDC(d)) { sw->drawn = true; PresentSub(sw); }
     return ok;
 }
 static BOOL WINAPI Hook_StretchBlt(HDC d, int x, int y, int w, int h, HDC s, int sx, int sy, int sw, int sh, DWORD rop)
@@ -976,17 +1207,22 @@ static BOOL WINAPI Hook_StretchBlt(HDC d, int x, int y, int w, int h, HDC s, int
     if (d == g_vdc && g_vdc && x == 0 && y == 0 && w == (int)g_w && h == (int)g_h) FrameLimit();
     if (d == g_vdc && g_vdc && w * h * 4 >= (int)(g_w * g_h)) PresentSoon();
     else if (d == g_vdc && g_vdc) MarkDirty();
+    else if (SubWin* swn = FindSubByDC(d)) { swn->drawn = true; PresentSub(swn); }
     return ok;
 }
 static int WINAPI Hook_FillRect(HDC dc, const RECT* r, HBRUSH b)
 {
     HDC d = RedirectDC(dc); if (d == g_vdc && g_vdc) MarkDirty();
-    return g_real_FillRect(d, r, b);
+    int res = g_real_FillRect(d, r, b);
+    if (SubWin* s = FindSubByDC(d)) { s->drawn = true; PresentSub(s); }
+    return res;
 }
 static BOOL WINAPI Hook_TextOutA(HDC dc, int x, int y, LPCSTR s, int n)
 {
     HDC d = RedirectDC(dc); if (d == g_vdc && g_vdc) MarkDirty();
-    return g_real_TextOutA(d, x, y, s, n);
+    BOOL res = g_real_TextOutA(d, x, y, s, n);
+    if (SubWin* sw = FindSubByDC(d)) { sw->drawn = true; PresentSub(sw); }
+    return res;
 }
 static int WINAPI Hook_SelectClipRgn(HDC dc, HRGN r)            { return g_real_SelectClipRgn(RedirectDC(dc), r); }
 static HPALETTE WINAPI Hook_SelectPalette(HDC dc, HPALETTE p, BOOL bg) { return g_real_SelectPalette(RedirectDC(dc), p, bg); }
@@ -999,6 +1235,13 @@ static UINT WINAPI Hook_GetSystemPaletteEntries(HDC dc, UINT a, UINT n, LPPALETT
 // --- coordinates and windows -----------------------------------------------------------------
 static BOOL WINAPI Hook_ScreenToClient(HWND h, LPPOINT p)
 {
+    if (SubWin* s = FindSub(h)) {
+        if (!p) return FALSE;
+        POINT o = { 0, 0 }; g_real_ClientToScreen(h, &o);
+        POINT r = { p->x - o.x, p->y - o.y };
+        *p = SubRealToVirt(s, r);
+        return TRUE;
+    }
     if (!(g_scaling && h == g_hwnd && p)) return g_real_ScreenToClient(h, p);
     POINT o = ClientOrigin();
     POINT r = { p->x - o.x, p->y - o.y };
@@ -1007,6 +1250,15 @@ static BOOL WINAPI Hook_ScreenToClient(HWND h, LPPOINT p)
 }
 static BOOL WINAPI Hook_ClientToScreen(HWND h, LPPOINT p)
 {
+    if (SubWin* s = FindSub(h)) {
+        if (!p) return FALSE;
+        RECT c; GetClientRect(h, &c);
+        int vw = s->v.right - s->v.left, vh = s->v.bottom - s->v.top;
+        POINT r = { vw ? (LONG)((long long)p->x * c.right / vw) : p->x, vh ? (LONG)((long long)p->y * c.bottom / vh) : p->y };
+        g_real_ClientToScreen(h, &r);
+        *p = r;
+        return TRUE;
+    }
     if (!(g_scaling && h == g_hwnd && p)) return g_real_ClientToScreen(h, p);
     POINT o = ClientOrigin();
     POINT r = VirtToReal(*p);                            // top-left of the scaled pixel
@@ -1014,20 +1266,49 @@ static BOOL WINAPI Hook_ClientToScreen(HWND h, LPPOINT p)
     return TRUE;
 }
 // The game window's rectangle as the game imagines it: 800x600 at the picture's screen position.
+// Panels the same way: real screen position, game size. The game places windows by taking their
+// GetWindowRect corner and converting it with ScreenToClient on the parent (traced 2026-10-02),
+// so the corner must be a real screen point.
 static BOOL WINAPI Hook_GetWindowRect(HWND h, LPRECT r)
 {
+    if (SubWin* s = FindSub(h)) {
+        if (!r) return FALSE;
+        POINT o = { 0, 0 }; g_real_ClientToScreen(h, &o);           // our panels have no frame
+        SetRect(r, o.x, o.y, o.x + s->v.right - s->v.left, o.y + s->v.bottom - s->v.top);
+        return TRUE;
+    }
     if (!(g_scaling && h == g_hwnd && r)) return g_real_GetWindowRect(h, r);
     POINT o = ClientOrigin();
     SetRect(r, o.x + g_offX, o.y + g_offY, o.x + g_offX + g_w, o.y + g_offY + g_h);
     return TRUE;
 }
+// Records a new game-coordinate rectangle for a panel; a size change replaces its bitmap.
+static void SubSetRect(SubWin* s, const RECT& v)
+{
+    bool resized = (v.right - v.left) != (s->v.right - s->v.left) || (v.bottom - v.top) != (s->v.bottom - s->v.top);
+    s->v = v;
+    if (resized && s->mdc) {
+        SelectObject(s->mdc, s->oldBmp); DeleteObject(s->bmp); DeleteDC(s->mdc);
+        s->mdc = 0; s->bmp = s->oldBmp = 0; s->drawn = false;
+    }
+}
 // The game moving/sizing windows:
 //   its main window: the game still tries to put it at (0,0) 800x600 as in fullscreen; we keep
 //   the position and size we (or the player) chose and only let z-order/show changes through;
-//   child windows of the main window: positioned in game coordinates, so they are scaled.
+//   its panels: positioned in game coordinates, so they are scaled;
+//   its pop-ups: positioned in game coordinates; moved into the picture at their own size;
+//   other child windows of the main window: positioned in game coordinates, so they are scaled.
 static BOOL WINAPI Hook_MoveWindow(HWND h, int x, int y, int w, int hh, BOOL rp)
 {
     if (g_scaling && h == g_hwnd) return TRUE;
+    if (SubWin* s = FindSub(h)) {
+        RECT v = { x, y, x + w, y + hh };
+        SubSetRect(s, v);
+        RECT r = SubRealRect(s->parent, v);
+        return g_real_MoveWindow(h, r.left, r.top, r.right - r.left, r.bottom - r.top, rp);
+    }
+    if (IsGamePopup(h)) { POINT p = PopupRealPos(x, y, w, hh); return g_real_MoveWindow(h, p.x, p.y, w, hh, rp); }
+    if (IsKeepSizeChild(h)) { POINT p = KeepSizeClientPos(x, y, w, hh); return g_real_MoveWindow(h, p.x, p.y, w, hh, rp); }
     if (!IsGameChild(h)) return g_real_MoveWindow(h, x, y, w, hh, rp);
     POINT v = { x, y }, r = VirtToReal(v);
     return g_real_MoveWindow(h, r.x, r.y, ToRealX(x + w) - r.x, ToRealY(y + hh) - r.y, rp);
@@ -1035,6 +1316,22 @@ static BOOL WINAPI Hook_MoveWindow(HWND h, int x, int y, int w, int hh, BOOL rp)
 static BOOL WINAPI Hook_SetWindowPos(HWND h, HWND after, int x, int y, int w, int hh, UINT f)
 {
     if (g_scaling && h == g_hwnd) return g_real_SetWindowPos(h, after, x, y, w, hh, f | SWP_NOMOVE | SWP_NOSIZE);
+    if (SubWin* s = FindSub(h)) {
+        if ((f & SWP_NOMOVE) && (f & SWP_NOSIZE)) return g_real_SetWindowPos(h, after, x, y, w, hh, f);
+        RECT v = s->v;
+        if (!(f & SWP_NOMOVE)) OffsetRect(&v, x - v.left, y - v.top);
+        if (!(f & SWP_NOSIZE)) { v.right = v.left + w; v.bottom = v.top + hh; }
+        SubSetRect(s, v);
+        RECT r = SubRealRect(s->parent, v);
+        return g_real_SetWindowPos(h, after, r.left, r.top, r.right - r.left, r.bottom - r.top, f);
+    }
+    if ((IsGamePopup(h) || IsKeepSizeChild(h)) && !(f & SWP_NOMOVE)) {
+        RECT cur; g_real_GetWindowRect(h, &cur);
+        int pw = (f & SWP_NOSIZE) ? cur.right - cur.left : w, ph = (f & SWP_NOSIZE) ? cur.bottom - cur.top : hh;
+        POINT p = IsGamePopup(h) ? PopupRealPos(x, y, pw, ph) : KeepSizeClientPos(x, y, pw, ph);
+        return g_real_SetWindowPos(h, after, p.x, p.y, w, hh, f);
+    }
+    if (IsKeepSizeChild(h)) return g_real_SetWindowPos(h, after, x, y, w, hh, f);
     if (!IsGameChild(h) || (f & SWP_NOMOVE && f & SWP_NOSIZE)) return g_real_SetWindowPos(h, after, x, y, w, hh, f);
     POINT v = { x, y }, r = VirtToReal(v);
     return g_real_SetWindowPos(h, after, r.x, r.y, ToRealX(x + w) - r.x, ToRealY(y + hh) - r.y, f);
@@ -1099,6 +1396,8 @@ static void InstallGameHooks()
     HOOK(gdi, "GDI32.dll", GetSystemPaletteEntries);
     HOOK(u32, "USER32.dll", GetAsyncKeyState);
     HOOK(wmm, "WINMM.dll", timeGetTime);
+    HOOK(u32, "USER32.dll", CreateWindowExA);
+    HOOK(u32, "USER32.dll", PeekMessageA);
 #undef HOOK
     g_realBitBlt     = (decltype(g_realBitBlt))GetProcAddress(gdi, "BitBlt");
     g_realStretchBlt = (decltype(g_realStretchBlt))GetProcAddress(gdi, "StretchBlt");
