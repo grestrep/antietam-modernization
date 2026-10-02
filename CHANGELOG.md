@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.0 (beta) - 2026-10-02
 - **Skip the intro videos (`[game] skip_intro=1`, off by default):** the logo videos are seeked to their end before they play, so the game gets its normal "finished" notification and goes straight to the menu.
 - **Intro videos in long folder paths:** MCI rejects file names longer than about 128 characters, and the game then waited forever on a black screen. A failed video open is now retried with the short (8.3) path.
 - **Scenario lists at full size:** the scenario list and the Battle History chapter list are separate windows the game draws at 1:1 size; they are now enlarged like the rest of the screen, and clicks land on the right item.
