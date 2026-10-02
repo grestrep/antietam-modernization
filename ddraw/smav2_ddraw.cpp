@@ -62,6 +62,7 @@
 #include <string.h>
 #include <share.h>
 #include <mmsystem.h>   // timeGetTime (hooked for present pacing)
+#include <digitalv.h>   // MCI digital-video window commands (skip_intro)
 #include "present_d3d11.h"
 
 // =====================================================================================
@@ -1157,13 +1158,19 @@ static SHORT WINAPI Hook_GetAsyncKeyState(int k) { if (g_dirty) FlushIfDue(); re
 // MCI_OPEN "avivideo" with the file, MCI_STATUS/WHERE/PUT/WINDOW to place it, MCI_PLAY with
 // MCI_NOTIFY, and on the "finished" notification MCI_STOP + MCI_CLOSE. With skip_intro=1 the
 // video is opened and played as usual, but we seek it to its end just before MCI_PLAY, so it
-// "finishes" at once and the game gets its normal notification and moves on to the menu.
+// "finishes" at once and the game gets its normal notification and moves on to the menu; its
+// video window is kept hidden so the last frame never shows.
 // Only files with "logo" in their name count as intro videos; anything else plays normally.
 // Independently of skip_intro: MCI rejects file names longer than about 128 characters (error
 // 304, "filename is invalid"), and then the game waits forever on a black screen for a video that
 // never started. If an open fails, we retry it once with the file's short 8.3 path.
 REAL(mciSendCommandA);
 static MCIDEVICEID g_introDev;
+static void HideIntroWindow(MCIDEVICEID id)
+{
+    MCI_DGV_WINDOW_PARMSA hide = {}; hide.nCmdShow = SW_HIDE;
+    g_real_mciSendCommandA(id, MCI_WINDOW, MCI_DGV_WINDOW_STATE, (DWORD_PTR)&hide);
+}
 static MCIERROR WINAPI Hook_mciSendCommandA(MCIDEVICEID id, UINT msg, DWORD_PTR flags, DWORD_PTR parm)
 {
     if (msg == MCI_OPEN && (flags & MCI_OPEN_ELEMENT) && parm) {
@@ -1182,13 +1189,20 @@ static MCIERROR WINAPI Hook_mciSendCommandA(MCIDEVICEID id, UINT msg, DWORD_PTR 
         }
         if (!r && g_skipIntro && file && !IsBadStringPtrA(file, MAX_PATH)) {
             char low[MAX_PATH]; strncpy_s(low, file, _TRUNCATE); _strlwr_s(low);
-            if (strstr(low, "logo")) { g_introDev = op->wDeviceID; Log("skip_intro: skipping %s", file); }
+            if (strstr(low, "logo")) { g_introDev = op->wDeviceID; HideIntroWindow(g_introDev); Log("skip_intro: skipping %s", file); }
         }
         return r;
     }
-    if (msg == MCI_PLAY && id && id == g_introDev) {
-        MCI_SEEK_PARMS seek = {};
-        g_real_mciSendCommandA(id, MCI_SEEK, MCI_SEEK_TO_END, (DWORD_PTR)&seek);
+    if ((msg == MCI_PLAY || msg == MCI_WINDOW) && id && id == g_introDev) {
+        // Keep the video window hidden: the seek leaves the last frame showing (the BreakAway
+        // video ends on its logo), and MCI shows the window again on PLAY and WINDOW commands.
+        if (msg == MCI_PLAY) {
+            MCI_SEEK_PARMS seek = {};
+            g_real_mciSendCommandA(id, MCI_SEEK, MCI_SEEK_TO_END, (DWORD_PTR)&seek);
+        }
+        MCIERROR r = g_real_mciSendCommandA(id, msg, flags, parm);
+        HideIntroWindow(id);
+        return r;
     }
     if (msg == MCI_CLOSE && id && id == g_introDev) g_introDev = 0;
     return g_real_mciSendCommandA(id, msg, flags, parm);
