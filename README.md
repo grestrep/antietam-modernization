@@ -51,6 +51,7 @@ Open `smav2.ini` in the game folder with Notepad. Each option is explained in th
 | `renderer` | `d3d11` (graphics card, default) or `gdi` (CPU) |
 | `gpu` | `high` (dedicated GPU, default), `low` (integrated), `default` |
 | `vsync` | `1` / `0` |
+| `max_fps` (section `[game]`) | Frame limit, mainly for edge-scroll speed: `40` (default), lower = slower scrolling, `0` = unlimited (original, very fast) |
 
 ## Problems?
 - **Bug reports:** `smav2_ddraw.log` in the game folder records what the DLL did. Please attach it to a [bug report](../../issues/new/choose), with your Windows version, graphics card and game version.

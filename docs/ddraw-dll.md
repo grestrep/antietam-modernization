@@ -222,6 +222,7 @@ The picture is shown 1:1 (filter `nearest`). Everything else (virtual screen, ho
 | `[display] dpi_aware` | `1` | Per-monitor DPI awareness (no double scaling on 125–200% displays) |
 | `[display] clip_cursor` | `1` | Keep the mouse in the window while active |
 | `[display] keep_focus` | `1` | Hide focus loss from the game |
+| `[game] max_fps` | `40` | Frame limit (edge-scroll speed); `0` = unlimited. Paces only whole-screen blits (0,0 800×600), see `FrameLimit()` |
 | `[debug] log` | `1` | Write `smav2_ddraw.log` |
 | `[debug] hang_watchdog` | `0` | HANG/STALL detector with stack samples |
 

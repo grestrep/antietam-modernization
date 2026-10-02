@@ -82,6 +82,7 @@ static int  g_gpuPref   = 1;              // [display] gpu: high (1) | low (2) |
 static bool g_clipCursor = true;           // [display] clip_cursor
 static bool g_dpiAware   = true;           // [display] dpi_aware
 static bool g_keepFocus  = true;           // [display] keep_focus
+static int  g_maxFps     = 40;             // [game]    max_fps (0 = unlimited)
 static bool g_logOn      = true;           // [debug]   log
 static bool g_watchdog   = false;          // [debug]   hang_watchdog
 
@@ -136,6 +137,8 @@ static void LoadConfig()
     g_clipCursor = GetPrivateProfileIntA("display", "clip_cursor", 1, ini) != 0;
     g_dpiAware   = GetPrivateProfileIntA("display", "dpi_aware", 1, ini) != 0;
     g_keepFocus  = GetPrivateProfileIntA("display", "keep_focus", 1, ini) != 0;
+    g_maxFps     = GetPrivateProfileIntA("game", "max_fps", 40, ini);
+    if (g_maxFps < 0 || g_maxFps > 1000) g_maxFps = 0;
     g_logOn      = GetPrivateProfileIntA("debug", "log", 1, ini) != 0;
     g_watchdog   = GetPrivateProfileIntA("debug", "hang_watchdog", 0, ini) != 0;
 }
@@ -422,6 +425,10 @@ static void FinishPresent()
 static bool g_snapEnabled;
 static void SnapshotIfRequested()
 {
+    static double lastCheck;                     // also called from hot hooks: look at most every 100 ms
+    double now = NowMs();
+    if (now - lastCheck < 100) return;
+    lastCheck = now;
     char req[MAX_PATH], bmp[MAX_PATH];
     sprintf_s(req, "%s\\smav2_snap.req", g_dir);
     if (!g_vbits || GetFileAttributesA(req) == INVALID_FILE_ATTRIBUTES) return;
@@ -511,6 +518,37 @@ static void FlushIfDue()
         ++g_statByTimer;                         // counted as "deferred"
         Present();
     }
+}
+
+// Waits about `ms` milliseconds with sub-millisecond precision (a high-resolution waitable timer
+// where Windows has one, Sleep otherwise).
+static void PreciseWait(double ms)
+{
+    static HANDLE timer = CreateWaitableTimerExW(0, 0, 0x00000002 /*CREATE_WAITABLE_TIMER_HIGH_RESOLUTION*/,
+                                                 TIMER_ALL_ACCESS);
+    if (timer) {
+        LARGE_INTEGER due; due.QuadPart = -(LONGLONG)(ms * 10000.0);    // relative, 100 ns units
+        if (SetWaitableTimer(timer, &due, 0, 0, 0, FALSE)) { WaitForSingleObject(timer, INFINITE); return; }
+    }
+    Sleep((DWORD)(ms + 0.5));
+}
+
+// [game] max_fps: caps how many frames the game draws per second. The game runs its main loop
+// flat out (over 1000 frames per second while scrolling on a modern PC) and moves the map a step
+// per frame - growing while the mouse stays at the edge - so edge scrolling is far too fast.
+// Holding each frame end until its time slot comes brings the frame rate - and with it the scroll
+// speed - back to what the game was tuned for. Same pacing as DDrawCompat's FpsLimiter.
+// We count only whole-screen blits (0,0 800x600) as frames, like DDrawCompat: a battle frame is
+// one such blit followed by ReleaseDC (traced 2026-10-01). Drop-down menus and dialogs draw item
+// by item with ReleaseDC after each piece; pacing those made them appear line by line.
+static void FrameLimit()
+{
+    if (g_maxFps <= 0) return;
+    static double next;
+    double interval = 1000.0 / g_maxFps, now = NowMs();
+    if (now >= next) { next = now + interval; return; }  // on time or late: no catch-up burst
+    PreciseWait(next - now);
+    next += interval;
 }
 
 // The game finished a frame (ReleaseDC/EndPaint/whole-screen blit): present now if possible.
@@ -885,7 +923,12 @@ static int WINAPI Hook_GetSystemMetrics(int i)
 }
 
 // --- present pacing: hooks the game calls constantly (see FlushIfDue) -------------------------
-static DWORD WINAPI Hook_timeGetTime()          { if (g_dirty) FlushIfDue(); return g_real_timeGetTime(); }
+static DWORD WINAPI Hook_timeGetTime()
+{
+    if (g_dirty) FlushIfDue();
+    if (g_snapEnabled) SnapshotIfRequested();    // in battle the WM_TIMER backstop is starved
+    return g_real_timeGetTime();
+}
 static SHORT WINAPI Hook_GetAsyncKeyState(int k) { if (g_dirty) FlushIfDue(); return g_real_GetAsyncKeyState(k); }
 
 // --- drawing -------------------------------------------------------------------------------
@@ -920,7 +963,8 @@ static BOOL WINAPI Hook_BitBlt(HDC d, int x, int y, int w, int h, HDC s, int sx,
     InterlockedIncrement(&g_blits);
     d = RedirectDC(d); s = RedirectDC(s);
     BOOL ok = g_realBitBlt(d, x, y, w, h, s, sx, sy, rop);
-    if (d == g_vdc && g_vdc && w * h * 4 >= (int)(g_w * g_h)) PresentSoon();   // big blit = frame
+    if (d == g_vdc && g_vdc && x == 0 && y == 0 && w == (int)g_w && h == (int)g_h) FrameLimit();   // whole screen = frame
+    if (d == g_vdc && g_vdc && w * h * 4 >= (int)(g_w * g_h)) PresentSoon();   // big blit: present now
     else if (d == g_vdc && g_vdc) MarkDirty();
     return ok;
 }
@@ -929,6 +973,7 @@ static BOOL WINAPI Hook_StretchBlt(HDC d, int x, int y, int w, int h, HDC s, int
     InterlockedIncrement(&g_blits);
     d = RedirectDC(d); s = RedirectDC(s);
     BOOL ok = g_realStretchBlt(d, x, y, w, h, s, sx, sy, sw, sh, rop);
+    if (d == g_vdc && g_vdc && x == 0 && y == 0 && w == (int)g_w && h == (int)g_h) FrameLimit();
     if (d == g_vdc && g_vdc && w * h * 4 >= (int)(g_w * g_h)) PresentSoon();
     else if (d == g_vdc && g_vdc) MarkDirty();
     return ok;
@@ -1363,6 +1408,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, void*)
             g_mode == MODE_FULLSCREEN ? "fullscreen" : g_mode == MODE_BORDERLESS ? "borderless" : g_mode == MODE_EXCLUSIVE ? "exclusive" : "windowed",
             g_scaleCfg, g_winW, g_winH, g_filterCfg == FILTER_NEAREST ? "nearest" : g_filterCfg == FILTER_LINEAR ? "linear" : g_filterCfg == FILTER_SHARP ? "sharp" : g_filterCfg == FILTER_SCALE2X ? "scale2x" : "auto", g_clipCursor, g_keepFocus);
         Log("renderer requested: %s, vsync=%d, swap=%s", g_wantD3D ? "d3d11" : "gdi", g_vsync, g_flipModel ? "flip" : "blt");
+        Log("max_fps=%d (0 = unlimited)", g_maxFps);
 
         LoadReal();
         ApplyGameFixes();                                // crash fixes, in every mode
