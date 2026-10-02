@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- **Skip the intro videos (`[game] skip_intro=1`, off by default):** the logo videos are seeked to their end before they play, so the game gets its normal "finished" notification and goes straight to the menu.
+- **Intro videos in long folder paths:** MCI rejects file names longer than about 128 characters, and the game then waited forever on a black screen. A failed video open is now retried with the short (8.3) path.
 - **Scenario lists at full size:** the scenario list and the Battle History chapter list are separate windows the game draws at 1:1 size; they are now enlarged like the rest of the screen, and clicks land on the right item.
 - **Pop-ups inside the game window:** "Select scenario type", the Save/Load dialogs and the Battle History text pane used to appear at the monitor's top-left corner. They now appear inside the game picture (centred dialogs stay centred), at their original size.
 - **Edge-scroll speed limit (`[game] max_fps`, default 40):** the game moves the map a step per frame and runs hundreds of frames per second on modern PCs, so edge scrolling was far too fast. The DLL now paces whole-screen frames to `max_fps` (same approach as DDrawCompat's FpsLimiter: one high-resolution wait per frame, no catch-up bursts). Menus, dialogs and highlights are not paced. `0` turns it off.

@@ -83,6 +83,7 @@ static bool g_clipCursor = true;           // [display] clip_cursor
 static bool g_dpiAware   = true;           // [display] dpi_aware
 static bool g_keepFocus  = true;           // [display] keep_focus
 static int  g_maxFps     = 40;             // [game]    max_fps (0 = unlimited)
+static bool g_skipIntro  = false;          // [game]    skip_intro
 static bool g_logOn      = true;           // [debug]   log
 static bool g_watchdog   = false;          // [debug]   hang_watchdog
 
@@ -138,6 +139,7 @@ static void LoadConfig()
     g_dpiAware   = GetPrivateProfileIntA("display", "dpi_aware", 1, ini) != 0;
     g_keepFocus  = GetPrivateProfileIntA("display", "keep_focus", 1, ini) != 0;
     g_maxFps     = GetPrivateProfileIntA("game", "max_fps", 40, ini);
+    g_skipIntro  = GetPrivateProfileIntA("game", "skip_intro", 0, ini) != 0;
     if (g_maxFps < 0 || g_maxFps > 1000) g_maxFps = 0;
     g_logOn      = GetPrivateProfileIntA("debug", "log", 1, ini) != 0;
     g_watchdog   = GetPrivateProfileIntA("debug", "hang_watchdog", 0, ini) != 0;
@@ -1150,6 +1152,48 @@ static DWORD WINAPI Hook_timeGetTime()
 }
 static SHORT WINAPI Hook_GetAsyncKeyState(int k) { if (g_dirty) FlushIfDue(); return g_real_GetAsyncKeyState(k); }
 
+// --- [game] skip_intro ------------------------------------------------------------------------
+// The startup logo videos (Video\logo.avi, Video\Breakaway_logo.avi) are played with MCI:
+// MCI_OPEN "avivideo" with the file, MCI_STATUS/WHERE/PUT/WINDOW to place it, MCI_PLAY with
+// MCI_NOTIFY, and on the "finished" notification MCI_STOP + MCI_CLOSE. With skip_intro=1 the
+// video is opened and played as usual, but we seek it to its end just before MCI_PLAY, so it
+// "finishes" at once and the game gets its normal notification and moves on to the menu.
+// Only files with "logo" in their name count as intro videos; anything else plays normally.
+// Independently of skip_intro: MCI rejects file names longer than about 128 characters (error
+// 304, "filename is invalid"), and then the game waits forever on a black screen for a video that
+// never started. If an open fails, we retry it once with the file's short 8.3 path.
+REAL(mciSendCommandA);
+static MCIDEVICEID g_introDev;
+static MCIERROR WINAPI Hook_mciSendCommandA(MCIDEVICEID id, UINT msg, DWORD_PTR flags, DWORD_PTR parm)
+{
+    if (msg == MCI_OPEN && (flags & MCI_OPEN_ELEMENT) && parm) {
+        MCIERROR r = g_real_mciSendCommandA(id, msg, flags, parm);
+        MCI_OPEN_PARMSA* op = (MCI_OPEN_PARMSA*)parm;
+        const char* file = op->lpstrElementName;
+        if (r && file && !IsBadStringPtrA(file, MAX_PATH)) {
+            char shortPath[MAX_PATH];
+            DWORD n = GetShortPathNameA(file, shortPath, MAX_PATH);
+            if (n && n < MAX_PATH && strcmp(shortPath, file)) {
+                op->lpstrElementName = shortPath;
+                r = g_real_mciSendCommandA(id, msg, flags, parm);
+                op->lpstrElementName = file;
+                Log("MCI open of %s failed; retried with %s -> %s", file, shortPath, r ? "failed again" : "ok");
+            }
+        }
+        if (!r && g_skipIntro && file && !IsBadStringPtrA(file, MAX_PATH)) {
+            char low[MAX_PATH]; strncpy_s(low, file, _TRUNCATE); _strlwr_s(low);
+            if (strstr(low, "logo")) { g_introDev = op->wDeviceID; Log("skip_intro: skipping %s", file); }
+        }
+        return r;
+    }
+    if (msg == MCI_PLAY && id && id == g_introDev) {
+        MCI_SEEK_PARMS seek = {};
+        g_real_mciSendCommandA(id, MCI_SEEK, MCI_SEEK_TO_END, (DWORD_PTR)&seek);
+    }
+    if (msg == MCI_CLOSE && id && id == g_introDev) g_introDev = 0;
+    return g_real_mciSendCommandA(id, msg, flags, parm);
+}
+
 // --- drawing -------------------------------------------------------------------------------
 static HDC WINAPI Hook_GetDC(HWND h)
 {
@@ -1396,6 +1440,7 @@ static void InstallGameHooks()
     HOOK(gdi, "GDI32.dll", GetSystemPaletteEntries);
     HOOK(u32, "USER32.dll", GetAsyncKeyState);
     HOOK(wmm, "WINMM.dll", timeGetTime);
+    HOOK(wmm, "WINMM.dll", mciSendCommandA);
     HOOK(u32, "USER32.dll", CreateWindowExA);
     HOOK(u32, "USER32.dll", PeekMessageA);
 #undef HOOK
@@ -1707,7 +1752,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, void*)
             g_mode == MODE_FULLSCREEN ? "fullscreen" : g_mode == MODE_BORDERLESS ? "borderless" : g_mode == MODE_EXCLUSIVE ? "exclusive" : "windowed",
             g_scaleCfg, g_winW, g_winH, g_filterCfg == FILTER_NEAREST ? "nearest" : g_filterCfg == FILTER_LINEAR ? "linear" : g_filterCfg == FILTER_SHARP ? "sharp" : g_filterCfg == FILTER_SCALE2X ? "scale2x" : "auto", g_clipCursor, g_keepFocus);
         Log("renderer requested: %s, vsync=%d, swap=%s", g_wantD3D ? "d3d11" : "gdi", g_vsync, g_flipModel ? "flip" : "blt");
-        Log("max_fps=%d (0 = unlimited)", g_maxFps);
+        Log("max_fps=%d (0 = unlimited), skip_intro=%d", g_maxFps, g_skipIntro);
 
         LoadReal();
         ApplyGameFixes();                                // crash fixes, in every mode
