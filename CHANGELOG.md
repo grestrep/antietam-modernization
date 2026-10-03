@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.11.0 (beta) - 2026-10-03
 - **Mouse-wheel zoom (`[game] wheel_zoom`, on by default):** each wheel notch is one press of the game's own zoom keys (Z = in, X = out), so the wheel steps through its six zoom levels. Ignored while a game dialog is open.
 - **Numpad map scrolling (`[game] numpad_map_scroll`, on by default):** numpad 8/4/6/2 scroll the battle map up/left/right/down, and 5 also scrolls down for an 8/4/5/6 layout like W/A/S/D (two keys held = diagonal), using the game's own edge scrolling, so the speed matches the mouse and `max_fps`. The arrow keys still rotate the view. With Num Lock on, scrolling starts at once (the keys are read directly, as the game reads its messages only every ~150 ms); with Num Lock off it works too, but starts about 0.2 s late; outside the battle map and in dialogs the numpad keys behave as before.
 
