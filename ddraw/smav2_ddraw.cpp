@@ -63,6 +63,7 @@
 #include <share.h>
 #include <mmsystem.h>   // timeGetTime (hooked for present pacing)
 #include <digitalv.h>   // MCI digital-video window commands (skip_intro)
+#include <intrin.h>     // _AddressOfReturnAddress (numpad_map_scroll)
 #include "present_d3d11.h"
 
 // =====================================================================================
@@ -86,6 +87,7 @@ static bool g_keepFocus  = true;           // [display] keep_focus
 static int  g_maxFps     = 40;             // [game]    max_fps (0 = unlimited)
 static bool g_skipIntro  = false;          // [game]    skip_intro
 static bool g_wheelZoom  = true;           // [game]    wheel_zoom
+static bool g_numpadScroll = true;         // [game]    numpad_map_scroll
 static bool g_logOn      = true;           // [debug]   log
 static bool g_watchdog   = false;          // [debug]   hang_watchdog
 
@@ -143,6 +145,7 @@ static void LoadConfig()
     g_maxFps     = GetPrivateProfileIntA("game", "max_fps", 40, ini);
     g_skipIntro  = GetPrivateProfileIntA("game", "skip_intro", 0, ini) != 0;
     g_wheelZoom  = GetPrivateProfileIntA("game", "wheel_zoom", 1, ini) != 0;
+    g_numpadScroll = GetPrivateProfileIntA("game", "numpad_map_scroll", 1, ini) != 0;
     if (g_maxFps < 0 || g_maxFps > 1000) g_maxFps = 0;
     g_logOn      = GetPrivateProfileIntA("debug", "log", 1, ini) != 0;
     g_watchdog   = GetPrivateProfileIntA("debug", "hang_watchdog", 0, ini) != 0;
@@ -641,6 +644,45 @@ static bool GamePopupVisible()
     return found;
 }
 
+// --- [game] numpad_map_scroll: the keys (the scrolling itself: see Hook_GetCursorPos) -----------
+enum { SCROLL_UP = 1, SCROLL_LEFT = 2, SCROLL_RIGHT = 4, SCROLL_DOWN = 8 };
+struct NumpadKey { UINT scan; int numVk, arrowVk, dir; };   // arrowVk = its VK with Num Lock off
+static const NumpadKey kNumpad[] = {
+    { 0x48, VK_NUMPAD8, VK_UP,    SCROLL_UP    },
+    { 0x4B, VK_NUMPAD4, VK_LEFT,  SCROLL_LEFT  },
+    { 0x4D, VK_NUMPAD6, VK_RIGHT, SCROLL_RIGHT },
+    { 0x50, VK_NUMPAD2, VK_DOWN,  SCROLL_DOWN  },
+};
+static int    g_numpadHeld;                      // SCROLL_* bits of the keys held (from key messages)
+static void*  g_edgeCheckRet;                    // the battle map's edge check (0 = feature off)
+static double g_battleMapSeen = -1e9;            // NowMs() of the last edge check = battle map is up
+
+// Is this key message one of numpad 8/4/6/2? (Scan code without the "extended" bit 24: the arrow
+// keys of the separate block share the scan codes but are extended keys.)
+static const NumpadKey* NumpadKeyOf(UINT m, LPARAM lp)
+{
+    if (m != WM_KEYDOWN && m != WM_KEYUP && m != WM_CHAR) return 0;
+    if (lp & (1 << 24)) return 0;
+    UINT scan = (UINT)(lp >> 16) & 0xFF;
+    for (const NumpadKey& k : kNumpad) if (k.scan == scan) return &k;
+    return 0;
+}
+
+// Called by WndProc for every message of the game window - the game gets its keys there; they do
+// not pass through Hook_PeekMessageA (checked 2026-10-03). Keeps g_numpadHeld up to date and
+// returns true if the game must not see the message: a numpad scroll key on the battle map.
+static bool FilterNumpadKey(UINT m, LPARAM lp)
+{
+    const NumpadKey* k = NumpadKeyOf(m, lp);
+    if (!k) return false;
+    if (m == WM_KEYUP) g_numpadHeld &= ~k->dir;                     // always, so nothing sticks
+    // the edge check runs every battle-map frame, so half a second without one means another
+    // screen (or max_fps below 2)
+    if (NowMs() - g_battleMapSeen > 500 || GamePopupVisible()) return false;
+    if (m == WM_KEYDOWN) g_numpadHeld |= k->dir;
+    return true;
+}
+
 // Our window procedure, installed in front of the game's (subclassing). Everything not handled
 // here is passed on to the game's own procedure through CallWindowProcA.
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp)
@@ -665,6 +707,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         POINT v = RealToVirt(r);
         lp = MAKELPARAM((WORD)(short)v.x, (WORD)(short)v.y);
     }
+
+    if (g_edgeCheckRet && FilterNumpadKey(m, lp)) return 0;     // numpad_map_scroll: hide the key
 
     switch (m) {
     case WM_MOUSEWHEEL:
@@ -1107,6 +1151,116 @@ static POINT KeepSizeClientPos(int x, int y, int w, int h)
     return p;
 }
 
+// --- [game] numpad_map_scroll: numpad 8/4/6/2 scroll the battle map ----------------------------
+// The game scrolls the map only when the mouse touches an edge of its 800x600 picture; it has no
+// scroll keys (the arrow keys rotate the view). While numpad 8/4/6/2 is held, the game's edge check
+// is told the mouse sits at that edge, so the map moves through the game's own edge scrolling -
+// same speed, paced by max_fps. Two keys held (e.g. 8 + 4) scroll diagonally.
+//
+// The edge check (traced 2026-10-03; same code in v9.84 and v12.10): once per battle-map frame the
+// game asks its "where is the mouse" helper - GetCursorPos + ScreenToClient on the game window -
+// scales the point to 320x240 (x * 4 / 10) and scrolls if it lies on the outer row or column
+// (x == 0 or 319, y == 0 or 239). The same helper serves about 18 other places (clicks, drags,
+// menus), so only this one call gets the faked point: Hook_GetCursorPos checks its own return
+// address (inside the helper) and the helper's return address (the edge check). Both are found by
+// byte signature at start-up (FindScrollCheck); in an unknown build nothing is faked.
+//
+// The keys are recognised by scan code, so Num Lock on and off both work (with Num Lock off
+// Windows reports numpad 8 as VK_UP, which the game would take as the arrow key). On the battle
+// map our window procedure keeps their messages from the game (FilterNumpadKey). Elsewhere they
+// pass through untouched: a menu screen treats numpad 4/6 like the left/right arrow keys, and in a
+// game pop-up the numpad types digits (e.g. into the save name).
+REAL(GetCursorPos);
+static void*  g_mouseHelperRet;                  // return address of GetCursorPos inside the helper
+
+// Locates the edge check and the helper in the exe's code. The edge check calls the helper as
+//   8D 45 E4  8D 4D E8  50  51  B9 <object>  E8 <helper>  6A 04  E8 ...
+//   lea eax,[ebp-1Ch]; lea ecx,[ebp-18h]; push eax; push ecx; mov ecx,<object>;
+//   call helper; push 4; call <scale>
+// (exactly one match in v9.84 and in v12.10). The helper must start with the expected prologue
+// and make its call at +1Dh through the exe's GetCursorPos import: Hook_GetCursorPos relies on
+// the stack layout of exactly this code.
+static bool FindScrollCheck(HMODULE exe)
+{
+    BYTE* base = (BYTE*)exe;
+    IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
+    IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+    BYTE* code = base + sec->VirtualAddress;     // first section = .text
+    DWORD size = sec->Misc.VirtualSize;
+    static const BYTE sig[] = { 0x8D, 0x45, 0xE4, 0x8D, 0x4D, 0xE8, 0x50, 0x51, 0xB9, 0, 0, 0, 0,
+                                0xE8, 0, 0, 0, 0, 0x6A, 0x04, 0xE8 };
+    BYTE* found = 0; int hits = 0;
+    for (DWORD i = 0; i + sizeof sig <= size; ++i) {
+        bool ok = true;
+        for (DWORD j = 0; j < sizeof sig && ok; ++j)
+            if ((j < 9 || j > 12) && (j < 14 || j > 17) && code[i + j] != sig[j]) ok = false;  // skip the two operands
+        if (ok) { found = code + i; ++hits; }
+    }
+    if (hits != 1) return false;
+    BYTE* edgeRet = found + 18;                  // just after "call helper"
+    BYTE* helper = edgeRet + *(LONG*)(found + 14);
+    if (helper < code || helper + 0x23 > code + size) return false;
+    // sub esp,8; push ebx; mov ebx,[esp+10h]; push esi; push edi  ...  lea eax,[esp+0Ch]; push eax; call [import]
+    static const BYTE pro[] = { 0x83, 0xEC, 0x08, 0x53, 0x8B, 0x5C, 0x24, 0x10, 0x56, 0x57 };
+    static const BYTE pre[] = { 0x8D, 0x44, 0x24, 0x0C, 0x50, 0xFF, 0x15 };
+    if (memcmp(helper, pro, sizeof pro) || memcmp(helper + 0x18, pre, sizeof pre)) return false;
+    FARPROC* slot = *(FARPROC**)(helper + 0x1F);
+    if (*slot != GetProcAddress(GetModuleHandleA("user32.dll"), "GetCursorPos")) return false;
+    g_mouseHelperRet = helper + 0x23;
+    g_edgeCheckRet = edgeRet;
+    return true;
+}
+
+// The directions to scroll now. A key whose release we missed (it happened while another window
+// had the focus) is dropped here: it must still be down under one of its virtual-key codes.
+static int HeldScrollDirs()
+{
+    if (!g_numpadHeld) return 0;
+    for (const NumpadKey& k : kNumpad)
+        if ((g_numpadHeld & k.dir) && !(GetAsyncKeyState(k.numVk) & 0x8000) && !(GetAsyncKeyState(k.arrowVk) & 0x8000))
+            g_numpadHeld &= ~k.dir;
+    if (!g_numpadHeld || GamePopupVisible()) return 0;
+    int d = g_numpadHeld;
+    if ((d & SCROLL_UP) && (d & SCROLL_DOWN)) d &= ~(SCROLL_UP | SCROLL_DOWN);         // cancel out
+    if ((d & SCROLL_LEFT) && (d & SCROLL_RIGHT)) d &= ~(SCROLL_LEFT | SCROLL_RIGHT);
+    return d;
+}
+
+// Screen point that the game's ScreenToClient (our hook, while scaling) turns into game pixel v:
+// the first real pixel of v's column/row, ceil(v * picture / 800), kept inside the picture.
+static POINT GamePixelToScreen(POINT v)
+{
+    POINT c = v;
+    if (g_scaling) {
+        c.x = (LONG)(((long long)v.x * g_pw + g_w - 1) / g_w);
+        c.y = (LONG)(((long long)v.y * g_ph + g_h - 1) / g_h);
+        c.x = g_offX + (c.x < g_pw ? c.x : g_pw - 1);
+        c.y = g_offY + (c.y < g_ph ? c.y : g_ph - 1);
+    }
+    POINT o = ClientOrigin();
+    c.x += o.x; c.y += o.y;
+    return c;
+}
+
+static BOOL WINAPI Hook_GetCursorPos(LPPOINT p)
+{
+    BOOL r = g_real_GetCursorPos(p);
+    // ra[0]: our return address (inside the helper). ra[1] is our argument; ra[2..6] the helper's
+    // saved edi, esi, ebx and its 8 bytes of locals; ra[7] the helper's own return address.
+    void** ra = (void**)_AddressOfReturnAddress();
+    if (r && p && ra[0] == g_mouseHelperRet && ra[7] == g_edgeCheckRet) {
+        g_battleMapSeen = NowMs();
+        if (int d = HeldScrollDirs()) {
+            // Only the axis of a held key goes to its edge; the other keeps the real position.
+            POINT v = { d & SCROLL_LEFT ? 0 : (LONG)g_w - 1, d & SCROLL_UP ? 0 : (LONG)g_h - 1 };
+            POINT s = GamePixelToScreen(v);
+            if (d & (SCROLL_LEFT | SCROLL_RIGHT)) p->x = s.x;
+            if (d & (SCROLL_UP | SCROLL_DOWN))    p->y = s.y;
+        }
+    }
+    return r;
+}
+
 // The game takes the mouse messages of its panels straight from its PeekMessage loop
 // (they never reach the window procedure), so their coordinates are converted here.
 REAL(PeekMessageA);
@@ -1490,6 +1644,14 @@ static void InstallGameHooks()
     HOOK(wmm, "WINMM.dll", mciSendCommandA);
     HOOK(u32, "USER32.dll", CreateWindowExA);
     HOOK(u32, "USER32.dll", PeekMessageA);
+    if (g_numpadScroll) {
+        if (FindScrollCheck(exe)) {
+            HOOK(u32, "USER32.dll", GetCursorPos);
+            Log("numpad_map_scroll: edge check at %p, mouse helper returns at %p", g_edgeCheckRet, g_mouseHelperRet);
+        } else {
+            Log("WARNING: numpad_map_scroll: the game's edge-scroll check was not found (unknown build?) - off");
+        }
+    }
 #undef HOOK
     g_realBitBlt     = (decltype(g_realBitBlt))GetProcAddress(gdi, "BitBlt");
     g_realStretchBlt = (decltype(g_realStretchBlt))GetProcAddress(gdi, "StretchBlt");
@@ -1799,7 +1961,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, void*)
             g_mode == MODE_FULLSCREEN ? "fullscreen" : g_mode == MODE_BORDERLESS ? "borderless" : g_mode == MODE_EXCLUSIVE ? "exclusive" : "windowed",
             g_scaleCfg, g_winW, g_winH, g_filterCfg == FILTER_NEAREST ? "nearest" : g_filterCfg == FILTER_LINEAR ? "linear" : g_filterCfg == FILTER_SHARP ? "sharp" : g_filterCfg == FILTER_SCALE2X ? "scale2x" : "auto", g_clipCursor, g_keepFocus);
         Log("renderer requested: %s, vsync=%d, swap=%s", g_wantD3D ? "d3d11" : "gdi", g_vsync, g_flipModel ? "flip" : "blt");
-        Log("max_fps=%d (0 = unlimited), skip_intro=%d, wheel_zoom=%d", g_maxFps, g_skipIntro, g_wheelZoom);
+        Log("max_fps=%d (0 = unlimited), skip_intro=%d, wheel_zoom=%d, numpad_map_scroll=%d", g_maxFps, g_skipIntro, g_wheelZoom, g_numpadScroll);
 
         LoadReal();
         ApplyGameFixes();                                // crash fixes, in every mode
