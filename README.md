@@ -51,6 +51,7 @@ Open `smav2.ini` in the game folder with Notepad. Each option is explained in th
 | `renderer` | `d3d11` (graphics card, default) or `gdi` (CPU) |
 | `gpu` | `high` (dedicated GPU, default), `low` (integrated), `default` |
 | `vsync` | `1` / `0` |
+| `wheel_zoom` (section `[game]`) | `1` = the mouse wheel steps through the game's zoom levels (default), `0` = off |
 | `skip_intro` (section `[game]`) | `1` = skip the logo videos at startup, `0` = play them (default) |
 | `max_fps` (section `[game]`) | Frame limit, mainly for edge-scroll speed: `40` (default), lower = slower scrolling, `0` = unlimited (original, very fast) |
 

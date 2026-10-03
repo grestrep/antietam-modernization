@@ -224,6 +224,7 @@ The picture is shown 1:1 (filter `nearest`). Everything else (virtual screen, ho
 | `[display] dpi_aware` | `1` | Per-monitor DPI awareness (no double scaling on 125–200% displays) |
 | `[display] clip_cursor` | `1` | Keep the mouse in the window while active |
 | `[display] keep_focus` | `1` | Hide focus loss from the game |
+| `[game] wheel_zoom` | `1` | `WM_MOUSEWHEEL` on the game window becomes posted `WM_KEYDOWN`/`WM_KEYUP` of `Z` (wheel up) or `X` (wheel down), one per notch; skipped while a game pop-up is visible (its modal loop would keep re-queuing the key) |
 | `[game] skip_intro` | `0` | `1`: logo videos (MCI, file name contains "logo") are seeked to the end before `MCI_PLAY`, so they finish at once. The `mciSendCommandA` hook also retries a failed open with the 8.3 short path (MCI rejects names over ~128 characters) |
 | `[game] max_fps` | `40` | Frame limit (edge-scroll speed); `0` = unlimited. Paces only whole-screen blits (0,0 800×600), see `FrameLimit()` |
 | `[debug] log` | `1` | Write `smav2_ddraw.log` |

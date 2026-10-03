@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- **Mouse-wheel zoom (`[game] wheel_zoom`, on by default):** each wheel notch is one press of the game's own zoom keys (Z = in, X = out), so the wheel steps through its six zoom levels. Ignored while a game dialog is open.
+
 ## 0.10.0 (beta) - 2026-10-02
 - **Skip the intro videos (`[game] skip_intro=1`, off by default):** the logo videos are seeked to their end before they play, so the game gets its normal "finished" notification and goes straight to the menu.
 - **Intro videos in long folder paths:** MCI rejects file names longer than about 128 characters, and the game then waited forever on a black screen. A failed video open is now retried with the short (8.3) path.

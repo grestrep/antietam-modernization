@@ -85,6 +85,7 @@ static bool g_dpiAware   = true;           // [display] dpi_aware
 static bool g_keepFocus  = true;           // [display] keep_focus
 static int  g_maxFps     = 40;             // [game]    max_fps (0 = unlimited)
 static bool g_skipIntro  = false;          // [game]    skip_intro
+static bool g_wheelZoom  = true;           // [game]    wheel_zoom
 static bool g_logOn      = true;           // [debug]   log
 static bool g_watchdog   = false;          // [debug]   hang_watchdog
 
@@ -141,6 +142,7 @@ static void LoadConfig()
     g_keepFocus  = GetPrivateProfileIntA("display", "keep_focus", 1, ini) != 0;
     g_maxFps     = GetPrivateProfileIntA("game", "max_fps", 40, ini);
     g_skipIntro  = GetPrivateProfileIntA("game", "skip_intro", 0, ini) != 0;
+    g_wheelZoom  = GetPrivateProfileIntA("game", "wheel_zoom", 1, ini) != 0;
     if (g_maxFps < 0 || g_maxFps > 1000) g_maxFps = 0;
     g_logOn      = GetPrivateProfileIntA("debug", "log", 1, ini) != 0;
     g_watchdog   = GetPrivateProfileIntA("debug", "hang_watchdog", 0, ini) != 0;
@@ -626,6 +628,19 @@ static const char* FocusMsgName(UINT m)
     return 0;
 }
 
+// Is one of the game's pop-ups (a top-level window owned by the game window) on screen?
+static BOOL CALLBACK FindVisiblePopup(HWND w, LPARAM found)
+{
+    if (w != g_hwnd && IsWindowVisible(w) && GetWindow(w, GW_OWNER) == g_hwnd) { *(bool*)found = true; return FALSE; }
+    return TRUE;
+}
+static bool GamePopupVisible()
+{
+    bool found = false;
+    EnumThreadWindows(GetCurrentThreadId(), FindVisiblePopup, (LPARAM)&found);
+    return found;
+}
+
 // Our window procedure, installed in front of the game's (subclassing). Everything not handled
 // here is passed on to the game's own procedure through CallWindowProcA.
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp)
@@ -652,6 +667,24 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp)
     }
 
     switch (m) {
+    case WM_MOUSEWHEEL:
+        // [game] wheel_zoom: the game (1999) ignores the wheel. Each notch becomes one press of its
+        // zoom keys - Z zooms in, X zooms out - posted to the game's own message queue. Not while
+        // one of its dialogs is up (the key could land in a text field such as the save name).
+        if (g_wheelZoom) {
+            if (GamePopupVisible()) return 0;
+            static int acc;                              // fractional notches (high-resolution wheels)
+            acc += (short)HIWORD(wp);
+            while (acc >= WHEEL_DELTA || acc <= -WHEEL_DELTA) {
+                UINT key = acc > 0 ? 'Z' : 'X';
+                acc += acc > 0 ? -WHEEL_DELTA : WHEEL_DELTA;
+                LPARAM scan = (LPARAM)MapVirtualKeyA(key, 0 /*MAPVK_VK_TO_VSC*/) << 16;
+                PostMessageA(h, WM_KEYDOWN, key, scan | 1);
+                PostMessageA(h, WM_KEYUP, key, scan | 1 | 0xC0000000);
+            }
+            return 0;
+        }
+        break;
     case WM_TIMER:
         if (wp == kPresentTimer) {                                                          // ours
             if (g_dirty) { ++g_statByTimer; Present(); }
@@ -1766,7 +1799,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, void*)
             g_mode == MODE_FULLSCREEN ? "fullscreen" : g_mode == MODE_BORDERLESS ? "borderless" : g_mode == MODE_EXCLUSIVE ? "exclusive" : "windowed",
             g_scaleCfg, g_winW, g_winH, g_filterCfg == FILTER_NEAREST ? "nearest" : g_filterCfg == FILTER_LINEAR ? "linear" : g_filterCfg == FILTER_SHARP ? "sharp" : g_filterCfg == FILTER_SCALE2X ? "scale2x" : "auto", g_clipCursor, g_keepFocus);
         Log("renderer requested: %s, vsync=%d, swap=%s", g_wantD3D ? "d3d11" : "gdi", g_vsync, g_flipModel ? "flip" : "blt");
-        Log("max_fps=%d (0 = unlimited), skip_intro=%d", g_maxFps, g_skipIntro);
+        Log("max_fps=%d (0 = unlimited), skip_intro=%d, wheel_zoom=%d", g_maxFps, g_skipIntro, g_wheelZoom);
 
         LoadReal();
         ApplyGameFixes();                                // crash fixes, in every mode
