@@ -671,6 +671,7 @@ static const NumpadKey* NumpadKeyOf(UINT m, LPARAM lp)
 // Called by WndProc for every message of the game window - the game gets its keys there; they do
 // not pass through Hook_PeekMessageA (checked 2026-10-03). Keeps g_numpadHeld up to date and
 // returns true if the game must not see the message: a numpad scroll key on the battle map.
+// (With Num Lock on, HeldScrollDirs reads the keys directly; g_numpadHeld serves Num Lock off.)
 static bool FilterNumpadKey(UINT m, LPARAM lp)
 {
     const NumpadKey* k = NumpadKeyOf(m, lp);
@@ -1165,8 +1166,8 @@ static POINT KeepSizeClientPos(int x, int y, int w, int h)
 // address (inside the helper) and the helper's return address (the edge check). Both are found by
 // byte signature at start-up (FindScrollCheck); in an unknown build nothing is faked.
 //
-// The keys are recognised by scan code, so Num Lock on and off both work (with Num Lock off
-// Windows reports numpad 8 as VK_UP, which the game would take as the arrow key). On the battle
+// The keys are recognised by VK_NUMPADn (Num Lock on) and by scan code (Num Lock off: Windows then
+// reports numpad 8 as VK_UP, which the game would take as the arrow key), see HeldScrollDirs. On the battle
 // map our window procedure keeps their messages from the game (FilterNumpadKey). Elsewhere they
 // pass through untouched: a menu screen treats numpad 4/6 like the left/right arrow keys, and in a
 // game pop-up the numpad types digits (e.g. into the save name).
@@ -1211,16 +1212,26 @@ static bool FindScrollCheck(HMODULE exe)
     return true;
 }
 
-// The directions to scroll now. A key whose release we missed (it happened while another window
-// had the focus) is dropped here: it must still be down under one of its virtual-key codes.
+// The directions to scroll now, read when the edge check asks. The key messages come too late to
+// start scrolling: the game empties its message queue only every ~150 ms, and the frame after
+// that takes another ~150 ms, so a press reached the edge check ~300 ms late (measured
+// 2026-10-03) and a short tap was over before it arrived. So:
+//   * Num Lock on: the key's own VK_NUMPADn is unambiguous - read it with GetAsyncKeyState, at
+//     once (only while the game window is in front: the state is global). Bit 0 ("pressed since
+//     the last call") also counts, so a tap shorter than a frame still scrolls one frame's step;
+//   * Num Lock off: the key reports VK_UP etc., the same as the arrow keys, so only its message
+//     (scan code) tells them apart; it scrolls while that message said "down" and the VK is
+//     still down - a release we missed (another window had the focus) is dropped here.
 static int HeldScrollDirs()
 {
-    if (!g_numpadHeld) return 0;
-    for (const NumpadKey& k : kNumpad)
-        if ((g_numpadHeld & k.dir) && !(GetAsyncKeyState(k.numVk) & 0x8000) && !(GetAsyncKeyState(k.arrowVk) & 0x8000))
-            g_numpadHeld &= ~k.dir;
-    if (!g_numpadHeld || GamePopupVisible()) return 0;
-    int d = g_numpadHeld;
+    bool front = GetForegroundWindow() == g_hwnd;
+    int d = 0;
+    for (const NumpadKey& k : kNumpad) {
+        if (front && (GetAsyncKeyState(k.numVk) & 0x8001)) d |= k.dir;
+        else if ((g_numpadHeld & k.dir) && (GetAsyncKeyState(k.arrowVk) & 0x8000)) d |= k.dir;
+        else g_numpadHeld &= ~k.dir;
+    }
+    if (!d || GamePopupVisible()) return 0;
     if ((d & SCROLL_UP) && (d & SCROLL_DOWN)) d &= ~(SCROLL_UP | SCROLL_DOWN);         // cancel out
     if ((d & SCROLL_LEFT) && (d & SCROLL_RIGHT)) d &= ~(SCROLL_LEFT | SCROLL_RIGHT);
     return d;
