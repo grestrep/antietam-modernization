@@ -652,12 +652,14 @@ static const NumpadKey kNumpad[] = {
     { 0x4B, VK_NUMPAD4, VK_LEFT,  SCROLL_LEFT  },
     { 0x4D, VK_NUMPAD6, VK_RIGHT, SCROLL_RIGHT },
     { 0x50, VK_NUMPAD2, VK_DOWN,  SCROLL_DOWN  },
+    { 0x4C, VK_NUMPAD5, VK_CLEAR, SCROLL_DOWN  },   // 5 as well: 8/4/5/6 like W/A/S/D
 };
-static int    g_numpadHeld;                      // SCROLL_* bits of the keys held (from key messages)
+static int    g_numpadHeld;                      // bit i: kNumpad[i] held (from key messages)
+static int KeyBit(const NumpadKey* k) { return 1 << (int)(k - kNumpad); }
 static void*  g_edgeCheckRet;                    // the battle map's edge check (0 = feature off)
 static double g_battleMapSeen = -1e9;            // NowMs() of the last edge check = battle map is up
 
-// Is this key message one of numpad 8/4/6/2? (Scan code without the "extended" bit 24: the arrow
+// Is this key message one of numpad 8/4/6/2/5? (Scan code without the "extended" bit 24: the arrow
 // keys of the separate block share the scan codes but are extended keys.)
 static const NumpadKey* NumpadKeyOf(UINT m, LPARAM lp)
 {
@@ -676,11 +678,11 @@ static bool FilterNumpadKey(UINT m, LPARAM lp)
 {
     const NumpadKey* k = NumpadKeyOf(m, lp);
     if (!k) return false;
-    if (m == WM_KEYUP) g_numpadHeld &= ~k->dir;                     // always, so nothing sticks
+    if (m == WM_KEYUP) g_numpadHeld &= ~KeyBit(k);                    // always, so nothing sticks
     // the edge check runs every battle-map frame, so half a second without one means another
     // screen (or max_fps below 2)
     if (NowMs() - g_battleMapSeen > 500 || GamePopupVisible()) return false;
-    if (m == WM_KEYDOWN) g_numpadHeld |= k->dir;
+    if (m == WM_KEYDOWN) g_numpadHeld |= KeyBit(k);
     return true;
 }
 
@@ -1152,11 +1154,12 @@ static POINT KeepSizeClientPos(int x, int y, int w, int h)
     return p;
 }
 
-// --- [game] numpad_map_scroll: numpad 8/4/6/2 scroll the battle map ----------------------------
+// --- [game] numpad_map_scroll: numpad 8/4/6/2 (and 5) scroll the battle map ----------------------
 // The game scrolls the map only when the mouse touches an edge of its 800x600 picture; it has no
-// scroll keys (the arrow keys rotate the view). While numpad 8/4/6/2 is held, the game's edge check
-// is told the mouse sits at that edge, so the map moves through the game's own edge scrolling -
-// same speed, paced by max_fps. Two keys held (e.g. 8 + 4) scroll diagonally.
+// scroll keys (the arrow keys rotate the view). While numpad 8/4/6/2 is held (5 also scrolls
+// down, for an 8/4/5/6 layout like W/A/S/D), the game's edge check is told the mouse sits at that
+// edge, so the map moves through the game's own edge scrolling - same speed, paced by max_fps.
+// Two keys held (e.g. 8 + 4) scroll diagonally.
 //
 // The edge check (traced 2026-10-03; same code in v9.84 and v12.10): once per battle-map frame the
 // game asks its "where is the mouse" helper - GetCursorPos + ScreenToClient on the game window -
@@ -1167,9 +1170,9 @@ static POINT KeepSizeClientPos(int x, int y, int w, int h)
 // byte signature at start-up (FindScrollCheck); in an unknown build nothing is faked.
 //
 // The keys are recognised by VK_NUMPADn (Num Lock on) and by scan code (Num Lock off: Windows then
-// reports numpad 8 as VK_UP, which the game would take as the arrow key), see HeldScrollDirs. On the battle
-// map our window procedure keeps their messages from the game (FilterNumpadKey). Elsewhere they
-// pass through untouched: a menu screen treats numpad 4/6 like the left/right arrow keys, and in a
+// reports numpad 8 as VK_UP, which the game would take as the arrow key), see HeldScrollDirs. On
+// the battle map our window procedure keeps their messages from the game (FilterNumpadKey).
+// Elsewhere they pass through untouched: a menu screen treats numpad 4/6 like the left/right arrow keys, and in a
 // game pop-up the numpad types digits (e.g. into the save name).
 REAL(GetCursorPos);
 static void*  g_mouseHelperRet;                  // return address of GetCursorPos inside the helper
@@ -1228,8 +1231,8 @@ static int HeldScrollDirs()
     int d = 0;
     for (const NumpadKey& k : kNumpad) {
         if (front && (GetAsyncKeyState(k.numVk) & 0x8001)) d |= k.dir;
-        else if ((g_numpadHeld & k.dir) && (GetAsyncKeyState(k.arrowVk) & 0x8000)) d |= k.dir;
-        else g_numpadHeld &= ~k.dir;
+        else if ((g_numpadHeld & KeyBit(&k)) && (GetAsyncKeyState(k.arrowVk) & 0x8000)) d |= k.dir;
+        else g_numpadHeld &= ~KeyBit(&k);
     }
     if (!d || GamePopupVisible()) return 0;
     if ((d & SCROLL_UP) && (d & SCROLL_DOWN)) d &= ~(SCROLL_UP | SCROLL_DOWN);         // cancel out
